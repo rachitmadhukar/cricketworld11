@@ -4,6 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Cricket World XI — Build the Ultimate Team</title>
+<!-- Inline SVG favicon — the X+bat mark, square crop -->
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><g stroke="%230F6E47" stroke-width="16" stroke-linecap="square"><line x1="10" y1="12" x2="55" y2="88"/><line x1="55" y1="12" x2="10" y2="88"/></g><rect x="71" y="6" width="8" height="14" rx="1.5" fill="%230F6E47"/><rect x="66" y="20" width="18" height="74" rx="2.5" fill="%230F6E47"/><rect x="74" y="24" width="2" height="64" rx="1" fill="%23F5A524"/></svg>' />
+<link rel="apple-touch-icon" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="%23FAF7F2"/><g stroke="%230F6E47" stroke-width="16" stroke-linecap="square"><line x1="10" y1="12" x2="55" y2="88"/><line x1="55" y1="12" x2="10" y2="88"/></g><rect x="71" y="6" width="8" height="14" rx="1.5" fill="%230F6E47"/><rect x="66" y="20" width="18" height="74" rx="2.5" fill="%230F6E47"/><rect x="74" y="24" width="2" height="64" rx="1" fill="%23F5A524"/></svg>' />
+<meta name="theme-color" content="#0F6E47" />
 <!-- Fonts: rely on system stack for the simple light theme -->
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -2113,10 +2117,16 @@ function challengeURL(payload) {
 }
 // Try to shorten via is.gd (free, no API key, CORS-enabled). Falls back to
 // the original URL if the shortener is unreachable or blocked.
-async function shortenURL(longURL) {
+async function shortenURL(longURL, timeoutMs = 3000) {
   if (!longURL) return longURL;
   try {
-    const resp = await fetch(`https://is.gd/create.php?format=simple&url=${encodeURIComponent(longURL)}`);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const resp = await fetch(
+      `https://is.gd/create.php?format=simple&url=${encodeURIComponent(longURL)}`,
+      { signal: ctrl.signal }
+    );
+    clearTimeout(t);
     if (!resp.ok) return longURL;
     const txt = (await resp.text()).trim();
     if (txt && /^https?:[/][/]/.test(txt)) return txt;
@@ -2128,13 +2138,17 @@ async function shortenURL(longURL) {
    Team-card image renderer — pure Canvas API, no external libs.
    Returns a Promise<Blob | null>. Used for the share sheet.
    ========================================================== */
-async function loadImageSafe(url) {
+async function loadImageSafe(url, timeoutMs = 5000) {
   if (!url) return null;
   return new Promise(resolve => {
     const img = new Image();
+    let settled = false;
+    const finish = (val) => { if (settled) return; settled = true; resolve(val); };
     img.crossOrigin = "anonymous";
-    img.onload  = () => resolve(img);
-    img.onerror = () => resolve(null);
+    img.onload  = () => finish(img);
+    img.onerror = () => finish(null);
+    // Hard timeout — Wikipedia sometimes hangs without firing onerror.
+    setTimeout(() => finish(null), timeoutMs);
     img.src = url;
   });
 }
@@ -3904,10 +3918,14 @@ function ScoreboardPanelSVG({ width=900, height=160 }) {
    Colours match the brand palette: deep-green #0F6E47,
    warm-gold #F5A524, near-black #1C1917, ball-red #D03737.
    ========================================================== */
-function LogoMark({ size = 36, monochrome }) {
-  const green = monochrome ? "currentColor" : "#0F6E47";
-  const gold  = monochrome ? "currentColor" : "#F5A524";
-  // viewBox 100×100: a clean X on the left, a cricket-bat "1" on the right.
+function LogoMark({ size = 36, monochrome, inverse }) {
+  // Inverse forces white (for use on the green login panel). Monochrome uses
+  // currentColor so the parent can recolour. Default uses the theme's accent
+  // green so dark mode still reads, and brand gold for the grip.
+  let green, gold;
+  if (monochrome)   { green = "currentColor"; gold = "currentColor"; }
+  else if (inverse) { green = "#FAF7F2";       gold = "#F5A524"; }
+  else              { green = "var(--accent)"; gold = "#F5A524"; }
   return (
     <svg width={size} height={size} viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-label="Cricket World XI">
       {/* The X — two crossing diagonal strokes with squared caps */}
@@ -3936,11 +3954,13 @@ function LogoLockup({ size = "md", inverse = false }) {
     lg: { icon: 68, fs: 32,  tracking: "-0.02em",  gap: 14 }
   };
   const d = dims[size] || dims.md;
-  const textColor = inverse ? "#FAF7F2" : "#1C1917";
+  // Light mode → near-black via CSS var; dark mode → near-white via the same var.
+  // Inverse (used on green panels) → forced near-white.
+  const textColor = inverse ? "#FAF7F2" : "var(--text-strong)";
   const goldColor = "#F5A524";
   return (
     <div className="flex items-center" style={{ gap: d.gap }}>
-      <LogoMark size={d.icon} />
+      <LogoMark size={d.icon} inverse={inverse} />
       <div style={{
         fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
         fontWeight: 900,
@@ -5778,7 +5798,7 @@ function FieldSlot({ idx, player, selectedPlayer, swapSelected, isCaptain, isDra
             <CricketIcon kind="aura" className="w-3.5 h-3.5 aura-c absolute -top-1 -right-1 bg-white rounded-full p-0.5" />
           )}
           {isCaptain && (
-            <span className="absolute -top-1 -left-1 text-[10px] w-4 h-4 rounded-full bg-strong-c font-bold flex items-center justify-center" style={{background:"var(--text-strong)", color:"var(--surface-card)"}}>C</span>
+            <span className="absolute -top-1 -left-1 text-[10px] w-4 h-4 rounded-full bg-strong-c font-bold flex items-center justify-center" style={{background:"var(--accent)", color:"#fff"}}>C</span>
           )}
           {player.isWk && (
             <span className="absolute -bottom-1 -right-1 text-[8px] px-1 py-0.5 rounded font-bold text-white" style={{background:"var(--aura)"}}>WK</span>
@@ -5955,7 +5975,7 @@ function Result({ lineup, lineupYears, captainSlot, fmt, mode, country, ratings,
             </div>
           )}
           {captainSlot != null && lineup[captainSlot] && (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-semibold text-sm" style={{background:"var(--text-strong)", color:"var(--surface-card)"}}>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-semibold text-sm" style={{background:"var(--accent)", color:"#fff"}}>
               C: {lineup[captainSlot].name} · +2%
             </div>
           )}
@@ -5990,7 +6010,7 @@ function Result({ lineup, lineupYears, captainSlot, fmt, mode, country, ratings,
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate text-strong-c flex items-center gap-1.5">
                     {p.name}
-                    {captainSlot === i && <span className="text-[9px] w-4 h-4 rounded-full flex items-center justify-center font-bold" style={{background:"var(--text-strong)", color:"var(--surface-card)"}}>C</span>}
+                    {captainSlot === i && <span className="text-[9px] w-4 h-4 rounded-full flex items-center justify-center font-bold" style={{background:"var(--accent)", color:"#fff"}}>C</span>}
                     {isAura(p.id, fmt) && <span className="text-[10px]" style={{color:"#f59e0b"}}>★</span>}
                   </div>
                   <div className="text-xs text-soft-c">
@@ -6108,18 +6128,27 @@ function ShareModal({ open, onClose, user, lineup, lineupYears, captainSlot, fmt
     let mounted = true;
     setBusy(true);
     setLink(longLink); setShortening(true);
-    // Render team card + shorten URL in parallel
-    Promise.all([
+    // Hard ceiling — even if Wikipedia or is.gd both hang, give up after 8s
+    // and let the user share with whatever's ready.
+    const hardTimeout = setTimeout(() => {
+      if (mounted) { setBusy(false); setShortening(false); }
+    }, 8000);
+    // Render team card + shorten URL in parallel. Each has its own inner timeout,
+    // so Promise.allSettled here just collects whichever finishes.
+    Promise.allSettled([
       renderTeamCard({ user, lineup, lineupYears, fmt, mode, country, captainSlot, ratings }),
       shortenURL(longLink)
-    ]).then(([b, shortLink]) => {
+    ]).then(results => {
       if (!mounted) return;
+      clearTimeout(hardTimeout);
+      const b = results[0].status === "fulfilled" ? results[0].value : null;
+      const shortLink = results[1].status === "fulfilled" ? results[1].value : null;
       if (b) { setBlob(b); setPreviewUrl(URL.createObjectURL(b)); }
       if (shortLink) setLink(shortLink);
       setShortening(false);
       setBusy(false);
-    }).catch(() => { if (mounted) { setBusy(false); setShortening(false); } });
-    return () => { mounted = false; if (previewUrl) URL.revokeObjectURL(previewUrl); };
+    });
+    return () => { mounted = false; clearTimeout(hardTimeout); if (previewUrl) URL.revokeObjectURL(previewUrl); };
   }, [open]);
 
   const canNativeShare = typeof navigator !== "undefined" && navigator.share && navigator.canShare;
@@ -6303,9 +6332,9 @@ function Leaderboard({ board, initialTab, currentUserId, onClear, onBack }) {
               onClick={() => setSubTab(t.key)}
               className="text-xs font-semibold px-3 py-1.5 rounded transition uppercase tracking-wider"
               style={{
-                background: subTab === t.key ? "var(--text-strong)" : "var(--surface-1)",
-                color:      subTab === t.key ? "var(--surface-card)" : "var(--text-soft)",
-                border:     `1px solid ${subTab === t.key ? "var(--text-strong)" : "var(--border)"}`
+                background: subTab === t.key ? "var(--accent)" : "var(--surface-1)",
+                color:      subTab === t.key ? "#fff" : "var(--text-soft)",
+                border:     `1px solid ${subTab === t.key ? "var(--accent)" : "var(--border)"}`
               }}>
               {t.label}
             </button>
