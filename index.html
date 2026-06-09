@@ -2117,21 +2117,59 @@ function challengeURL(payload) {
 }
 // Try to shorten via is.gd (free, no API key, CORS-enabled). Falls back to
 // the original URL if the shortener is unreachable or blocked.
-async function shortenURL(longURL, timeoutMs = 3000) {
-  if (!longURL) return longURL;
+async function tryShortenerService(longURL, service, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    const resp = await fetch(
-      `https://is.gd/create.php?format=simple&url=${encodeURIComponent(longURL)}`,
-      { signal: ctrl.signal }
-    );
+    let short = null;
+    if (service === "cleanuri") {
+      // cleanuri returns JSON, supports CORS reliably
+      const resp = await fetch("https://cleanuri.com/api/v1/shorten", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "url=" + encodeURIComponent(longURL),
+        signal: ctrl.signal
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        short = json && json.result_url;
+      }
+    } else if (service === "isgd") {
+      const resp = await fetch(
+        `https://is.gd/create.php?format=simple&url=${encodeURIComponent(longURL)}`,
+        { signal: ctrl.signal }
+      );
+      if (resp.ok) {
+        const txt = (await resp.text()).trim();
+        if (txt && /^https?:[/][/]/.test(txt)) short = txt;
+      }
+    } else if (service === "tinyurl") {
+      const resp = await fetch(
+        `https://tinyurl.com/api-create.php?url=${encodeURIComponent(longURL)}`,
+        { signal: ctrl.signal }
+      );
+      if (resp.ok) {
+        const txt = (await resp.text()).trim();
+        if (txt && /^https?:[/][/]/.test(txt)) short = txt;
+      }
+    }
+    return short;
+  } catch (e) {
+    return null;
+  } finally {
     clearTimeout(t);
-    if (!resp.ok) return longURL;
-    const txt = (await resp.text()).trim();
-    if (txt && /^https?:[/][/]/.test(txt)) return txt;
-    return longURL;
-  } catch(e) { return longURL; }
+  }
+}
+async function shortenURL(longURL, timeoutMs = 4000) {
+  if (!longURL) return longURL;
+  // Try CORS-friendly services in order. First success wins.
+  const services = ["cleanuri", "isgd", "tinyurl"];
+  for (const svc of services) {
+    const short = await tryShortenerService(longURL, svc, timeoutMs);
+    if (short) return short;
+    console.warn(`Shortener "${svc}" returned no result.`);
+  }
+  return longURL;
 }
 
 /* ==========================================================
@@ -6223,22 +6261,33 @@ function ShareModal({ open, onClose, user, lineup, lineupYears, captainSlot, fmt
           </span>
         </div>
 
-        {/* Share actions */}
-        <div className="grid grid-cols-2 gap-2 mb-3">
-          {(canShareFile || canNativeShare) && (
+        {/* Primary share path — the only one that carries the image */}
+        {(canShareFile || canNativeShare) && (
+          <div className="mb-3">
             <button onClick={doNativeShare}
-              className="col-span-2 px-4 py-3 rounded-md font-bold text-sm flex items-center justify-center gap-2"
+              disabled={shortening}
+              className="w-full px-4 py-3 rounded-md font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50"
               style={{background:"var(--accent)", color:"#fff"}}>
-              Share via apps…
+              {canShareFile ? "Share image + link via apps…" : "Share link via apps…"}
             </button>
-          )}
+            <div className="text-[10px] text-muted-c text-center mt-1.5">
+              {canShareFile
+                ? "Image + link goes to WhatsApp / Instagram / iMessage / etc."
+                : "Your browser can’t share images directly — use Download below."}
+            </div>
+          </div>
+        )}
+
+        {/* Secondary — text-only quick links */}
+        <div className="text-[10px] uppercase tracking-wider text-muted-c font-bold mb-1.5">Send link only</div>
+        <div className="grid grid-cols-2 gap-2 mb-3">
           <a href={whatsappURL} target="_blank" rel="noopener"
-            className="px-4 py-2.5 rounded-md font-semibold text-sm flex items-center justify-center gap-2"
+            className={`px-4 py-2.5 rounded-md font-semibold text-sm flex items-center justify-center gap-2 ${shortening?"pointer-events-none opacity-50":""}`}
             style={{background:"#25D366", color:"#fff"}}>
             WhatsApp
           </a>
           <a href={twitterURL} target="_blank" rel="noopener"
-            className="px-4 py-2.5 rounded-md font-semibold text-sm flex items-center justify-center gap-2"
+            className={`px-4 py-2.5 rounded-md font-semibold text-sm flex items-center justify-center gap-2 ${shortening?"pointer-events-none opacity-50":""}`}
             style={{background:"#1C1917", color:"#fff"}}>
             X / Twitter
           </a>
