@@ -9,6 +9,8 @@
 <link rel="apple-touch-icon" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="%23FAF7F2"/><g stroke="%230F6E47" stroke-width="16" stroke-linecap="square"><line x1="10" y1="12" x2="55" y2="88"/><line x1="55" y1="12" x2="10" y2="88"/></g><rect x="71" y="6" width="8" height="14" rx="1.5" fill="%230F6E47"/><rect x="66" y="20" width="18" height="74" rx="2.5" fill="%230F6E47"/><rect x="74" y="24" width="2" height="64" rx="1" fill="%23F5A524"/></svg>' />
 <meta name="theme-color" content="#0F6E47" />
 <!-- Fonts: rely on system stack for the simple light theme -->
+<!-- Google Identity Services (OAuth) — loads asynchronously -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -2006,6 +2008,38 @@ function initials(u) {
   const b = (u.lastName || "")[0] || "";
   return (a + b).toUpperCase() || "?";
 }
+/* ==========================================================
+   Google Sign-In (GSI). Only the public Client ID lives here —
+   never the client secret. If GSI fails to load (script blocked,
+   offline, etc) the email fallback path still works.
+   ========================================================== */
+const GOOGLE_CLIENT_ID = "530875096765-m96g4si21p8s7gbeqittkjr6tqggq79a.apps.googleusercontent.com";
+function decodeGoogleCredential(token) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length < 2) return null;
+    let payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (payload.length % 4) payload += "=";
+    const decoded = atob(payload);
+    // Handle UTF-8 names (e.g. accented characters) correctly
+    const json = decodeURIComponent(Array.prototype.map.call(decoded, c =>
+      "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2)).join(""));
+    return JSON.parse(json);
+  } catch(e) { return null; }
+}
+function userFromGoogleCredential(payload) {
+  if (!payload) return null;
+  return {
+    id: "g_" + (payload.sub || Math.random().toString(36).slice(2,10)),
+    firstName: payload.given_name || (payload.name || "").split(/\s+/)[0] || "Player",
+    lastName:  payload.family_name || (payload.name || "").split(/\s+/).slice(1).join(" ") || "",
+    email: payload.email || null,
+    avatar: payload.picture || null,
+    provider: "google",
+    createdAt: Date.now()
+  };
+}
+
 function guessNamesFromEmail(email) {
   const local = String(email || "").split("@")[0] || "";
   const cleaned = local.replace(/[^a-zA-Z.]/g, "");
@@ -4233,24 +4267,65 @@ function LoginBrandArt() {
 }
 
 function LoginScreen({ onSignIn }) {
-  // mode: "choose" | "google" | "email"
+  // mode: "choose" | "email"
   const [mode, setMode] = useState("choose");
   const [email, setEmail] = useState("");
   const [first, setFirst] = useState("");
   const [last, setLast] = useState("");
   const [errors, setErrors] = useState({});
-  const [prefilled, setPrefilled] = useState(false);
+  const [gsiReady, setGsiReady] = useState(false);
+  const [gsiError, setGsiError] = useState(null);
+  const googleBtnRef = useRef(null);
 
-  const onEmailBlur = () => {
-    if (mode === "google" && !prefilled && email.trim()) {
-      const g = guessNamesFromEmail(email);
-      if (g.first) setFirst(g.first);
-      if (g.last)  setLast(g.last);
-      setPrefilled(true);
+  // Wait for GSI script, then render the official Google button.
+  useEffect(() => {
+    if (mode !== "choose") return;
+    if (!GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID.startsWith("PASTE_")) {
+      setGsiError("Google sign-in not configured");
+      return;
     }
-  };
+    let cancelled = false;
+    let attempts = 0;
+    const tryRender = () => {
+      if (cancelled) return;
+      const g = window.google && window.google.accounts && window.google.accounts.id;
+      if (!g) {
+        if (attempts++ > 50) { setGsiError("Couldn't load Google sign-in"); return; }
+        return setTimeout(tryRender, 100);
+      }
+      try {
+        g.initialize({
+          client_id: GOOGLE_CLIENT_ID,
+          callback: (resp) => {
+            const payload = decodeGoogleCredential(resp && resp.credential);
+            const user = userFromGoogleCredential(payload);
+            if (user) onSignIn(user);
+          },
+          auto_select: false,
+          ux_mode: "popup"
+        });
+        if (googleBtnRef.current) {
+          // Clear any previous render
+          googleBtnRef.current.innerHTML = "";
+          g.renderButton(googleBtnRef.current, {
+            theme: "outline",
+            size: "large",
+            text: "continue_with",
+            shape: "pill",
+            logo_alignment: "left",
+            width: 320
+          });
+          setGsiReady(true);
+        }
+      } catch (e) {
+        setGsiError(e.message || "Google sign-in failed");
+      }
+    };
+    tryRender();
+    return () => { cancelled = true; };
+  }, [mode]);
 
-  const submit = (provider) => {
+  const submit = () => {
     const ne = (email || "").trim();
     const errs = {};
     if (!ne || !/^\S+@\S+\.\S+$/.test(ne)) errs.email = "Enter a valid email";
@@ -4263,7 +4338,7 @@ function LoginScreen({ onSignIn }) {
       firstName: first.trim(),
       lastName: last.trim(),
       email: ne,
-      provider,
+      provider: "email",
       createdAt: Date.now()
     });
   };
@@ -4313,16 +4388,22 @@ function LoginScreen({ onSignIn }) {
             {mode === "choose" && (
               <>
                 <h2 className="text-3xl font-black tracking-tight text-strong-c mb-1">Sign In</h2>
-                <p className="text-sm text-soft-c mb-7">Your name appears on the leaderboards. Stored locally on this device.</p>
+                <p className="text-sm text-soft-c mb-7">Your name appears on the leaderboards.</p>
 
-                <button onClick={() => setMode("google")}
-                  className="w-full flex items-center justify-center gap-2.5 px-4 py-3 rounded-full border-2 mb-3 font-medium text-sm transition"
-                  style={{borderColor: "var(--border)", background: "var(--surface-card)"}}
-                  onMouseOver={e => e.currentTarget.style.background = "var(--surface-1)"}
-                  onMouseOut={e => e.currentTarget.style.background = "var(--surface-card)"}>
-                  <GoogleGlyph size={18} />
-                  Continue with Google
-                </button>
+                {/* Real Google Identity Services button mounts here */}
+                <div ref={googleBtnRef} className="flex justify-center mb-1" />
+                {!gsiReady && !gsiError && (
+                  <div className="w-full flex items-center justify-center gap-2.5 px-4 py-3 rounded-full border-2 mb-1 font-medium text-sm"
+                    style={{borderColor: "var(--border)", color: "var(--text-soft)"}}>
+                    <GoogleGlyph size={18} />
+                    Loading Google sign-in…
+                  </div>
+                )}
+                {gsiError && (
+                  <div className="text-xs warn-c mt-1 mb-3 text-center">
+                    {gsiError}. Use email below instead.
+                  </div>
+                )}
 
                 <div className="flex items-center gap-3 my-5">
                   <div className="flex-1 h-px" style={{background:"var(--border)"}}></div>
@@ -4337,27 +4418,21 @@ function LoginScreen({ onSignIn }) {
                 </button>
 
                 <div className="text-[11px] text-muted-c text-center mt-6">
-                  By signing in you agree to play fair. We don’t store anything off your device.
+                  By signing in you agree to play fair. Names are profanity-filtered.
                 </div>
               </>
             )}
 
-            {(mode === "google" || mode === "email") && (
+            {mode === "email" && (
               <>
                 <button onClick={() => { setMode("choose"); setErrors({}); }}
                   className="text-xs text-soft-c hover:text-strong-c mb-3 flex items-center gap-1">← Back</button>
-                <h2 className="text-2xl font-black tracking-tight text-strong-c mb-1">
-                  {mode === "google" ? "Continue with Google" : "Continue with email"}
-                </h2>
-                <p className="text-sm text-soft-c mb-6">
-                  {mode === "google"
-                    ? "Enter your Gmail address — we'll pre-fill your name. You can edit it before continuing."
-                    : "We just need a name and an email."}
-                </p>
+                <h2 className="text-2xl font-black tracking-tight text-strong-c mb-1">Continue with email</h2>
+                <p className="text-sm text-soft-c mb-6">We just need a name and an email.</p>
 
                 <label className="block text-[11px] uppercase tracking-wider text-muted-c font-bold mb-1.5">Email</label>
-                <input value={email} onChange={e=>{setEmail(e.target.value); setPrefilled(false);}} onBlur={onEmailBlur}
-                  type="email" placeholder="you@gmail.com"
+                <input value={email} onChange={e=>setEmail(e.target.value)}
+                  type="email" placeholder="you@example.com"
                   className="w-full px-4 py-2.5 rounded-full bg-surface-1 border border-soft text-base-c text-sm mb-1 focus:outline-none" />
                 {errors.email && <div className="text-xs warn-c mb-2">{errors.email}</div>}
 
@@ -4378,7 +4453,7 @@ function LoginScreen({ onSignIn }) {
                   </div>
                 </div>
 
-                <button onClick={() => submit(mode)}
+                <button onClick={submit}
                   className="mt-6 w-full px-4 py-3 rounded-full font-bold text-sm transition"
                   style={{background:"var(--accent)", color:"#fff"}}>
                   Sign in →
